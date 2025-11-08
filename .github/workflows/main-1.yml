@@ -1,0 +1,146 @@
+name: RDP-Ubuntu
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp-ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Install Desktop Environment and xRDP
+        run: |
+          # Update package lists
+          sudo apt-get update
+          
+          # Install lightweight XFCE desktop environment (better xRDP compatibility than GNOME)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies
+          
+          # Install xRDP server
+          sudo apt-get install -y xrdp
+          
+          # Configure xRDP to use XFCE session
+          echo "xfce4-session" | sudo tee /etc/skel/.xsession
+          
+          # Add xrdp user to ssl-cert group for certificate access
+          sudo adduser xrdp ssl-cert
+          
+          # Enable and start xRDP service
+          sudo systemctl enable xrdp
+          sudo systemctl start xrdp
+          
+          # Verify xRDP is running
+          sudo systemctl status xrdp --no-pager
+
+      - name: Configure RDP and Firewall Settings
+        run: |
+          # Configure UFW firewall to allow RDP port 3389
+          sudo ufw allow 3389/tcp
+          
+          # Disable Wayland (improves xRDP compatibility)
+          sudo sed -i 's/#WaylandEnable=false/WaylandEnable=false/' /etc/gdm3/custom.conf || true
+          
+          # Restart xRDP to apply all changes
+          sudo systemctl restart xrdp
+          
+          # Verify port 3389 is listening
+          sudo ss -tlnp | grep 3389
+
+      - name: Create RDP User with Secure Password
+        run: |
+          # Generate a strong random password (25 characters)
+          PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+          
+          # Create user with home directory
+          sudo useradd -m -s /bin/bash rdpuser
+          
+          # Set the password
+          echo "rdpuser:$PASSWORD" | sudo chpasswd
+          
+          # Add user to sudo group for administrative access
+          sudo usermod -aG sudo rdpuser
+          
+          # Configure XFCE session for the new user
+          sudo -u rdpuser bash -c "echo 'xfce4-session' > /home/rdpuser/.xsession"
+          
+          # Store credentials in environment
+          echo "RDP_CREDS=User: rdpuser | Password: $PASSWORD" >> $GITHUB_ENV
+          echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+          
+          # Verify user was created
+          if ! id rdpuser &>/dev/null; then
+              echo "User creation failed"
+              exit 1
+          fi
+
+      - name: Install Tailscale
+        run: |
+          # Add Tailscale's package signing key and repository
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          
+          # Install Tailscale
+          sudo apt-get update
+          sudo apt-get install -y tailscale
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Connect to Tailscale network with auth key
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-ubuntu-rdp-${{ github.run_id }}
+          
+          # Wait for Tailscale to assign an IP
+          RETRIES=0
+          TAILSCALE_IP=""
+          while [ -z "$TAILSCALE_IP" ] && [ $RETRIES -lt 10 ]; do
+              TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "")
+              sleep 5
+              RETRIES=$((RETRIES + 1))
+          done
+          
+          if [ -z "$TAILSCALE_IP" ]; then
+              echo "Tailscale IP not assigned. Exiting."
+              exit 1
+          fi
+          
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+          
+          # Test RDP port 3389 is listening
+          if ! sudo ss -tlnp | grep ':3389'; then
+              echo "xRDP is not listening on port 3389"
+              exit 1
+          fi
+          
+          # Additional check for xRDP service status
+          if ! sudo systemctl is-active --quiet xrdp; then
+              echo "xRDP service is not active"
+              exit 1
+          fi
+          
+          echo "RDP connectivity verified - xRDP is listening on port 3389"
+
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "=== RDP ACCESS (Ubuntu with xRDP) ==="
+          echo "Address: $TAILSCALE_IP"
+          echo "Port: 3389 (default RDP)"
+          echo "Username: rdpuser"
+          echo "Password: $RDP_PASSWORD"
+          echo ""
+          echo "Connection instructions:"
+          echo "  Windows: Open Remote Desktop Connection (mstsc.exe)"
+          echo "  macOS: Use Microsoft Remote Desktop app"
+          echo "  Linux: Use Remmina or xfreerdp"
+          echo "======================================"
+          echo ""
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while true; do
+              echo "[$(date)] Ubuntu RDP Active - Use Ctrl+C in workflow to terminate"
+              sleep 300
+          done
