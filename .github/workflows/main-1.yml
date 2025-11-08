@@ -38,14 +38,12 @@ jobs:
           # Configure UFW firewall to allow RDP port 3389
           sudo ufw allow 3389/tcp
           
-          # Disable Wayland (improves xRDP compatibility)
-          sudo sed -i 's/#WaylandEnable=false/WaylandEnable=false/' /etc/gdm3/custom.conf || true
-          
           # Restart xRDP to apply all changes
           sudo systemctl restart xrdp
           
           # Verify port 3389 is listening
           sudo ss -tlnp | grep 3389
+
 
       - name: Create RDP User with Secure Password
         run: |
