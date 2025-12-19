@@ -1,0 +1,101 @@
+name: Ub-SSH
+
+on:
+  workflow_dispatch:
+
+jobs:
+  kali-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Update the system
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt update && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y --option "Dpkg::Options::=--force-confdef" --option "Dpkg::Options::=--force-confold"
+
+      - name: Generate SSH Keys and Secure Password
+        run: |
+          # Generate SSH host keys
+          mkdir -p ~/.ssh-host-keys
+          ssh-keygen -A -f ~/.ssh-host-keys
+          
+          # Generate secure random password
+          SSH_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+          echo "SSH_PASSWORD=$SSH_PASSWORD" >> $GITHUB_ENV
+          echo "Password generated successfully"
+
+      - name: Setup SSH config
+        run: |
+          useradd -m -s /bin/bash -G sudo test && \
+          echo 'test:${{ env.SSH_PASSWORD }}' | chpasswd && \
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
+          sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+          /usr/sbin/sshd -D
+          
+          # Wait for SSH to be ready
+          sleep 10
+
+      - name: Install Tailscale on Host
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+      - name: Establish Tailscale Connection
+        run: |
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-kali-${{ github.run_id }} --accept-routes
+          
+          # Wait for Tailscale to assign an IP
+          TAILSCALE_IP=""
+          retries=0
+          while [ -z "$TAILSCALE_IP" ] && [ $retries -lt 10 ]; do
+            TAILSCALE_IP=$(tailscale ip -4)
+            sleep 5
+            retries=$((retries + 1))
+          done
+          
+          if [ -z "$TAILSCALE_IP" ]; then
+            echo "Tailscale IP not assigned. Exiting."
+            exit 1
+          fi
+          
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+          echo "Tailscale IP: $TAILSCALE_IP"
+
+      - name: Verify SSH Accessibility
+        run: |
+          echo "Testing SSH connectivity..."
+          
+          # Test SSH port
+          timeout 10 bash -c "cat < /dev/null > /dev/tcp/localhost/22" && echo "SSH port accessible" || echo "SSH port test failed"
+
+      - name: Install Common Kali Tools (Optional)
+        run: |
+          sudo apt install python3 python3-pip git
+
+          sudo apt install -y nmap \
+                              wireshark \
+                              john \
+                              hydra \
+                              sqlmap \
+                              netcat-traditional \
+                              tcpdump \
+                              git \
+                              vim \
+                              tmux
+
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "=== Ubuntu SSH ACCESS ==="
+          echo "Tailscale IP: ${{ env.TAILSCALE_IP }}"
+          echo "SSH Command: ssh test@${{ env.TAILSCALE_IP }}"
+          echo "Username: test"
+          echo "Password: ${{ env.SSH_PASSWORD }}"
+          echo "======================="
+          echo ""
+          
+          # Keep runner active
+          while true; do
+            echo "[$(date)] Ubuntu SSH Active - Use Actions UI to cancel workflow"
+            
+            sleep 300
+          done
