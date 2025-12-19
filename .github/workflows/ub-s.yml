@@ -1,4 +1,4 @@
-name: Ub-SSH
+name: Ubuntu-SSH
 
 on:
   workflow_dispatch:
@@ -15,10 +15,6 @@ jobs:
 
       - name: Generate SSH Keys and Secure Password
         run: |
-          # Generate SSH host keys
-          mkdir -p ~/.ssh-host-keys
-          ssh-keygen -A -f ~/.ssh-host-keys
-          
           # Generate secure random password
           SSH_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
           echo "SSH_PASSWORD=$SSH_PASSWORD" >> $GITHUB_ENV
@@ -26,10 +22,10 @@ jobs:
 
       - name: Setup SSH config
         run: |
-          useradd -m -s /bin/bash -G sudo test && \
+          sudo useradd -m -s /bin/bash -G sudo test && \
           echo 'test:${{ env.SSH_PASSWORD }}' | chpasswd && \
-          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
-          sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
           /usr/sbin/sshd -D
           
           # Wait for SSH to be ready
@@ -81,6 +77,7 @@ jobs:
                               git \
                               vim \
                               tmux
+
 
       - name: Maintain Connection
         run: |
