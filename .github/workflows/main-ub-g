@@ -1,0 +1,101 @@
+name: Ubuntu-Gnome-RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ubuntu-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # Max duration (6 hours)
+
+    steps:
+      - name: System Update & Essentials
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget git sudo
+
+      - name: Install Gnome Desktop & XRDP
+        # Installing 'ubuntu-desktop-minimal' to save time/space, but it includes Gnome
+        run: |
+          echo "Installing Desktop Environment (this takes a few minutes)..."
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get install -y ubuntu-desktop-minimal xrdp
+          
+          # Fix for XRDP ssl-cert access
+          sudo adduser xrdp ssl-cert
+          
+          # Configure XRDP to start Gnome session
+          echo "gnome-session" > ~/.xsession
+          
+          # Optimization: Disable Gnome animations for better RDP performance
+          gsettings set org.gnome.desktop.interface enable-animations false || true
+
+      - name: Fix Polkit for Remote Sessions
+        # Essential: Prevents "Authentication Required" popups that crash XRDP
+        run: |
+          sudo bash -c "cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla" <<EOF
+          [Allow Colord all Users]
+          Identity=unix-user:*
+          Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
+          ResultAny=no
+          ResultInactive=no
+          ResultActive=yes
+          EOF
+
+      - name: Generate User & Password
+        run: |
+          # Generate secure random password
+          RDP_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
+          echo "RDP_PASSWORD=$RDP_PASSWORD" >> $GITHUB_ENV
+          
+          # Create a dedicated RDP user
+          sudo useradd -m -s /bin/bash -G sudo,adm,dip,video,plugdev desktop-user
+          echo "desktop-user:$RDP_PASSWORD" | sudo chpasswd
+          
+          echo "User 'desktop-user' created successfully."
+
+      - name: Start XRDP Service
+        run: |
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          # Verify it's listening on 3389
+          if netstat -tpln | grep 3389; then
+            echo "XRDP is listening."
+          else
+            echo "XRDP failed to start."
+            exit 1
+          fi
+
+      - name: Install Tailscale & Connect
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=$TAILSCALE_AUTH_KEY --hostname=gh-ubuntu-gnome-${{ github.run_id }} --ssh
+          
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+
+      - name: Connection Details
+        run: |
+          echo "=========================================="
+          echo "      UBUNTU GNOME RDP READY"
+          echo "=========================================="
+          echo "RDP IP Address: ${{ env.TAILSCALE_IP }}"
+          echo "RDP Port:       3389"
+          echo "Username:       desktop-user"
+          echo "Password:       ${{ env.RDP_PASSWORD }}"
+          echo "=========================================="
+          echo "NOTE: When connecting via RDP, ignore certificate warnings."
+          echo "If using Microsoft Remote Desktop, ensure 'Color Depth' is set to 16-bit or 24-bit for speed."
+
+      - name: Keep Alive Loop
+        run: |
+          while true; do
+            # Check if XRDP is still running
+            if ! systemctl is-active --quiet xrdp; then
+              echo "XRDP died, restarting..."
+              sudo systemctl start xrdp
+            fi
+            sleep 60
+          done
