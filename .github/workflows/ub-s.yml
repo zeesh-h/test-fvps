@@ -9,10 +9,6 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Update the system
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt update && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y --option "Dpkg::Options::=--force-confdef" --option "Dpkg::Options::=--force-confold"
-
       - name: Generate SSH Keys and Secure Password
         run: |
           # Generate secure random password
@@ -22,11 +18,22 @@ jobs:
 
       - name: Setup SSH config
         run: |
-          sudo useradd -m -s /bin/bash -G sudo test && \
-          echo 'test:${{ env.SSH_PASSWORD }}' | chpasswd && \
-          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-          /usr/sbin/sshd -D
+          # 1. Create the user
+          sudo useradd -m -s /bin/bash -G sudo test
+          
+          # 2. Set password - FIXED: Added 'sudo' before chpasswd
+          echo "test:${{ env.SSH_PASSWORD }}" | sudo chpasswd
+          
+          # 3. Configure SSH Daemon
+          # We use generic replacements to ensure we catch the config lines
+          sudo sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          # Ensure it's set even if it wasn't commented out
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          
+          # 4. Start SSH Service - FIXED: Used 'service start' instead of 'sshd -D'
+          # 'sshd -D' runs in the foreground and blocks the rest of the script.
+          sudo service ssh start
           
           # Wait for SSH to be ready
           sleep 10
@@ -59,25 +66,11 @@ jobs:
       - name: Verify SSH Accessibility
         run: |
           echo "Testing SSH connectivity..."
+          # Verify the service is actually running
+          sudo service ssh status
           
           # Test SSH port
           timeout 10 bash -c "cat < /dev/null > /dev/tcp/localhost/22" && echo "SSH port accessible" || echo "SSH port test failed"
-
-      - name: Install Common Kali Tools (Optional)
-        run: |
-          sudo apt install python3 python3-pip git
-
-          sudo apt install -y nmap \
-                              wireshark \
-                              john \
-                              hydra \
-                              sqlmap \
-                              netcat-traditional \
-                              tcpdump \
-                              git \
-                              vim \
-                              tmux
-
 
       - name: Maintain Connection
         run: |
@@ -93,6 +86,5 @@ jobs:
           # Keep runner active
           while true; do
             echo "[$(date)] Ubuntu SSH Active - Use Actions UI to cancel workflow"
-            
             sleep 300
           done
