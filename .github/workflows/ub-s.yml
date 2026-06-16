@@ -12,10 +12,10 @@ jobs:
       - name: Setup User and SSH Public Key
         run: |
           sudo useradd -m -s /bin/bash -G sudo test
-          sudo mkdir -p /home/root/.ssh
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" | sudo tee /home/root/.ssh/authorized_keys > /dev/null
-          sudo chmod 700 /home/root/.ssh
-          sudo chmod 600 /home/root/.ssh/authorized_keys
+          sudo mkdir -p /root/.ssh
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" | sudo tee /root/.ssh/authorized_keys > /dev/null
+          sudo chmod 700 /root/.ssh
+          sudo chmod 600 /root/.ssh/authorized_keys
 
       - name: Install Tailscale on Host
         run: |
