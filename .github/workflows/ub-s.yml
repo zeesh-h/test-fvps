@@ -21,6 +21,14 @@ jobs:
       - name: Install Tailscale on Host
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Configure Secure SSH Daemon
+        run: |
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          sudo service ssh restart
+          sleep 5
           
       - name: Establish Tailscale Connection
         run: |
