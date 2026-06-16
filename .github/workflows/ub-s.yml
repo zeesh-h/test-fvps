@@ -12,11 +12,10 @@ jobs:
       - name: Setup User and SSH Public Key
         run: |
           sudo useradd -m -s /bin/bash -G sudo test
-          sudo mkdir -p /home/test/.ssh
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" | sudo tee /home/test/.ssh/authorized_keys > /dev/null
-          sudo chmod 700 /home/test/.ssh
-          sudo chmod 600 /home/test/.ssh/authorized_keys
-          sudo chown -R test:test /home/test/.ssh
+          sudo mkdir -p /home/root/.ssh
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" | sudo tee /home/root/.ssh/authorized_keys > /dev/null
+          sudo chmod 700 /home/root/.ssh
+          sudo chmod 600 /home/root/.ssh/authorized_keys
 
       - name: Install Tailscale on Host
         run: |
@@ -60,7 +59,7 @@ jobs:
           echo ""
           echo "=== SECURE UBUNTU SSH ACCESS ==="
           echo "Tailscale IP: ${{ env.TAILSCALE_IP }}"
-          echo "SSH Command: ssh test@${{ env.TAILSCALE_IP }}"
+          echo "SSH Command: ssh root@${{ env.TAILSCALE_IP }}"
           echo "Authentication: Public Key Only (No passwords)"
           echo "================================="
           echo ""
