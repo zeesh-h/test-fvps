@@ -38,7 +38,7 @@ jobs:
           $password = "${{ secrets.MY_PASSWORD }}"
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
 
-          New-LocalUser -Name "jugaar" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -FullName "Desktop User"
+          New-LocalUser -Name "desktop-user" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -FullName "Desktop User"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "desktop-user"
           Add-LocalGroupMember -Group "Administrators" -Member "desktop-user"
 
@@ -74,7 +74,7 @@ jobs:
           Write-Host "=========================================="
           Write-Host "Tailscale IP:  $env:TAILSCALE_IP"
           Write-Host "RDP Port:      $env:RDP_PORT"
-          Write-Host "Username:      jugaar"
+          Write-Host "Username:      desktop-user"
           Write-Host "Password:      $env:RDP_PASSWORD"
           Write-Host "=========================================="
           Write-Host "Connect using: $env:TAILSCALE_IP`:$env:RDP_PORT"
