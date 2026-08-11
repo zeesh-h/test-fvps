@@ -25,25 +25,22 @@ jobs:
           echo "\$nrconf{restart} = 'a';" | sudo tee /etc/needrestart/conf.d/99-autorestart.conf
           echo "\$nrconf{kernelhints} = 0;" | sudo tee -a /etc/needrestart/conf.d/99-autorestart.conf
 
-      - name: Install XFCE Desktop & XRDP
+      - name: Install XFCE, XRDP & OpenSSH
         timeout-minutes: 15  # fail fast instead of hanging for hours
         env:
           DEBIAN_FRONTEND: noninteractive
           NEEDRESTART_MODE: a          # auto-restart services, don't prompt
           NEEDRESTART_SUSPEND: 1       # belt-and-suspenders: disable needrestart apt hook
         run: |
-          echo "::group::Installing XFCE + XRDP (much lighter than full GNOME)"
+          echo "::group::Installing XFCE + XRDP + OpenSSH (much lighter than full GNOME)"
           sudo apt-get install -y \
             -o Dpkg::Options::="--force-confdef" \
             -o Dpkg::Options::="--force-confold" \
-            xfce4 xfce4-goodies xrdp dbus-x11 x11-xserver-utils
+            xfce4 xfce4-goodies xrdp dbus-x11 x11-xserver-utils openssh-server
           echo "::endgroup::"
 
           # Fix for XRDP ssl-cert access
           sudo adduser xrdp ssl-cert
-
-          # Configure XRDP to start an XFCE session
-          echo "startxfce4" > ~/.xsession
 
       - name: Fix Polkit for Remote Sessions
         # Essential: Prevents "Authentication Required" popups that crash XRDP
@@ -62,23 +59,50 @@ jobs:
 
       - name: Generate User & Password
         run: |
-          # Generate secure random password
+          # Generate secure random password (shared by RDP and SSH)
           RDP_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
           echo "RDP_PASSWORD=$RDP_PASSWORD" >> $GITHUB_ENV
 
-          # Create a dedicated RDP user
+          # Create a dedicated RDP/SSH user
           sudo useradd -m -s /bin/bash -G sudo,adm,dip,video,plugdev desktop-user
           echo "desktop-user:$RDP_PASSWORD" | sudo chpasswd
 
           echo "User 'desktop-user' created successfully."
 
-      - name: Configure Custom RDP Port
+      - name: Configure XFCE Session for desktop-user
+        # Must run AFTER desktop-user exists -- writing to ~/.xsession earlier
+        # would land in the runner's own home dir, not desktop-user's, and
+        # XRDP would then fail to find a session to launch on login.
+        run: |
+          echo "startxfce4" | sudo tee /home/desktop-user/.xsession
+          sudo chown desktop-user:desktop-user /home/desktop-user/.xsession
+
+      - name: Configure Custom RDP Port & Security Layer
         run: |
           # Only the [Globals] port= line (the first one) is the actual RDP
           # listener; the other port= lines belong to Xorg/Xvnc backend
           # sections and should stay as-is.
           sudo sed -i "0,/^port=3389/s//port=${RDP_PORT}/" /etc/xrdp/xrdp.ini
-          grep "^port=" /etc/xrdp/xrdp.ini
+
+          # Force plain RDP security instead of TLS/NLA negotiation -- some
+          # RDP clients fail to connect at all against xrdp's self-signed
+          # cert under the default "negotiate" mode.
+          sudo sed -i "s/^security_layer=.*/security_layer=rdp/" /etc/xrdp/xrdp.ini
+
+          grep -E "^(port|security_layer)=" /etc/xrdp/xrdp.ini
+
+      - name: Configure Password SSH Access
+        run: |
+          # tailscale up --ssh enables Tailscale SSH (identity-based, no
+          # password). This enables normal OpenSSH password login too.
+          # Ubuntu's cloud-init image ships a drop-in disabling password
+          # auth -- ours must be named to sort before it so it wins
+          # (sshd_config uses first-match-wins per directive).
+          echo "PasswordAuthentication yes" | sudo tee /etc/ssh/sshd_config.d/10-allow-password.conf
+          echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config.d/10-allow-password.conf
+          sudo systemctl enable ssh
+          sudo systemctl restart ssh
+          sudo sshd -T | grep -i passwordauthentication
 
       - name: Start XRDP Service
         run: |
@@ -111,16 +135,19 @@ jobs:
       - name: Connection Details
         run: |
           echo "=========================================="
-          echo "      UBUNTU XFCE RDP READY"
+          echo "      UBUNTU XFCE REMOTE ACCESS READY"
           echo "=========================================="
-          echo "RDP IP Address: ${{ env.TAILSCALE_IP }}"
-          echo "RDP Port:       ${{ env.RDP_PORT }}"
+          echo "Tailscale IP:   ${{ env.TAILSCALE_IP }}"
           echo "Username:       desktop-user"
           echo "Password:       ${{ env.RDP_PASSWORD }}"
+          echo "------------------------------------------"
+          echo "RDP  -> ${{ env.TAILSCALE_IP }}:${{ env.RDP_PORT }}"
+          echo "SSH  -> ssh desktop-user@${{ env.TAILSCALE_IP }}   (password login, port 22)"
           echo "=========================================="
           echo "NOTE: When connecting via RDP, ignore certificate warnings."
           echo "If using Microsoft Remote Desktop, ensure 'Color Depth' is set to 16-bit or 24-bit for speed."
-          echo "NOTE: Since the port isn't 3389, connect using IP:PORT, e.g. ${{ env.TAILSCALE_IP }}:${{ env.RDP_PORT }}"
+          echo "NOTE: 'tailscale ssh' also works using your Tailscale identity, no password needed,"
+          echo "      e.g. tailscale ssh desktop-user@gh-ubuntu-xfce-${{ github.run_id }}"
 
       - name: Keep Alive Loop
         run: |
