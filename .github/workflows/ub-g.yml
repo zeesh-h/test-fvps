@@ -14,19 +14,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl wget git sudo
 
+      - name: Suppress Interactive Prompts (needrestart/debconf)
+        # Prevents apt from hanging on a whiptail dialog asking which
+        # services to restart, and auto-answers dpkg config-file prompts.
+        run: |
+          sudo mkdir -p /etc/needrestart/conf.d
+          echo "\$nrconf{restart} = 'a';" | sudo tee /etc/needrestart/conf.d/99-autorestart.conf
+          echo "\$nrconf{kernelhints} = 0;" | sudo tee -a /etc/needrestart/conf.d/99-autorestart.conf
+
       - name: Install Gnome Desktop & XRDP
-        # Installing 'ubuntu-desktop-minimal' to save time/space, but it includes Gnome
+        timeout-minutes: 20  # fail fast instead of hanging for hours
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a          # auto-restart services, don't prompt
+          NEEDRESTART_SUSPEND: 1       # belt-and-suspenders: disable needrestart apt hook
         run: |
           echo "Installing Desktop Environment (this takes a few minutes)..."
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get install -y ubuntu-desktop-minimal xrdp
-          
+          sudo apt-get install -y \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            ubuntu-desktop-minimal xrdp
+
           # Fix for XRDP ssl-cert access
           sudo adduser xrdp ssl-cert
-          
+
           # Configure XRDP to start Gnome session
           echo "gnome-session" > ~/.xsession
-          
+
           # Optimization: Disable Gnome animations for better RDP performance
           gsettings set org.gnome.desktop.interface enable-animations false || true
 
@@ -47,11 +61,11 @@ jobs:
           # Generate secure random password
           RDP_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
           echo "RDP_PASSWORD=$RDP_PASSWORD" >> $GITHUB_ENV
-          
+
           # Create a dedicated RDP user
           sudo useradd -m -s /bin/bash -G sudo,adm,dip,video,plugdev desktop-user
           echo "desktop-user:$RDP_PASSWORD" | sudo chpasswd
-          
+
           echo "User 'desktop-user' created successfully."
 
       - name: Start XRDP Service
@@ -72,7 +86,7 @@ jobs:
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey=$TAILSCALE_AUTH_KEY --hostname=gh-ubuntu-gnome-${{ github.run_id }} --ssh
-          
+
           TAILSCALE_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
 
