@@ -3,6 +3,9 @@ name: Ubuntu-Desk
 on:
   workflow_dispatch:
 
+env:
+  RDP_PORT: 3390  # change this to whatever custom port you want
+
 jobs:
   ubuntu-rdp:
     runs-on: ubuntu-latest
@@ -44,7 +47,10 @@ jobs:
 
       - name: Fix Polkit for Remote Sessions
         # Essential: Prevents "Authentication Required" popups that crash XRDP
+        # Ubuntu 24.04's polkit doesn't pre-create this directory, so it must
+        # be created before writing the .pkla file into it.
         run: |
+          sudo mkdir -p /etc/polkit-1/localauthority/50-local.d
           sudo bash -c "cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla" <<EOF
           [Allow Colord all Users]
           Identity=unix-user:*
@@ -66,13 +72,18 @@ jobs:
 
           echo "User 'desktop-user' created successfully."
 
+      - name: Configure Custom RDP Port
+        run: |
+          sudo sed -i "s/^port=3389/port=${RDP_PORT}/" /etc/xrdp/xrdp.ini
+          grep "^port=" /etc/xrdp/xrdp.ini
+
       - name: Start XRDP Service
         run: |
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
-          # Verify it's listening on 3389
-          if netstat -tpln | grep 3389; then
-            echo "XRDP is listening."
+          # Verify it's listening on the configured port
+          if netstat -tpln | grep ":${RDP_PORT}"; then
+            echo "XRDP is listening on port ${RDP_PORT}."
           else
             echo "XRDP failed to start."
             exit 1
@@ -94,12 +105,13 @@ jobs:
           echo "      UBUNTU XFCE RDP READY"
           echo "=========================================="
           echo "RDP IP Address: ${{ env.TAILSCALE_IP }}"
-          echo "RDP Port:       3389"
+          echo "RDP Port:       ${{ env.RDP_PORT }}"
           echo "Username:       desktop-user"
           echo "Password:       ${{ env.RDP_PASSWORD }}"
           echo "=========================================="
           echo "NOTE: When connecting via RDP, ignore certificate warnings."
           echo "If using Microsoft Remote Desktop, ensure 'Color Depth' is set to 16-bit or 24-bit for speed."
+          echo "NOTE: Since the port isn't 3389, connect using IP:PORT, e.g. ${{ env.TAILSCALE_IP }}:${{ env.RDP_PORT }}"
 
       - name: Keep Alive Loop
         run: |
