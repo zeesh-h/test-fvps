@@ -74,18 +74,27 @@ jobs:
 
       - name: Configure Custom RDP Port
         run: |
-          sudo sed -i "s/^port=3389/port=${RDP_PORT}/" /etc/xrdp/xrdp.ini
+          # Only the [Globals] port= line (the first one) is the actual RDP
+          # listener; the other port= lines belong to Xorg/Xvnc backend
+          # sections and should stay as-is.
+          sudo sed -i "0,/^port=3389/s//port=${RDP_PORT}/" /etc/xrdp/xrdp.ini
           grep "^port=" /etc/xrdp/xrdp.ini
 
       - name: Start XRDP Service
         run: |
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
-          # Verify it's listening on the configured port
-          if netstat -tpln | grep ":${RDP_PORT}"; then
+          sleep 3  # give it a moment to bind the socket
+
+          # Use `ss` instead of `netstat` -- net-tools isn't guaranteed to be
+          # present on the runner image, which can produce a false failure.
+          if sudo ss -tulnp | grep -q ":${RDP_PORT} "; then
             echo "XRDP is listening on port ${RDP_PORT}."
           else
-            echo "XRDP failed to start."
+            echo "XRDP does not appear to be listening. Dumping service logs for diagnosis:"
+            sudo systemctl status xrdp --no-pager -l || true
+            sudo systemctl status xrdp-sesman --no-pager -l || true
+            sudo journalctl -u xrdp -u xrdp-sesman --no-pager -n 100 || true
             exit 1
           fi
 
