@@ -7,7 +7,7 @@ env:
   RDP_PORT: 3390  # change this to whatever custom port you want
 
 jobs:
-  windows-rdp:
+  windows-connection:
     runs-on: windows-latest
     timeout-minutes: 360  # Max duration (6 hours)
 
@@ -35,13 +35,10 @@ jobs:
       - name: Create RDP User & Password
         shell: powershell
         run: |
-          # Curated character set avoids symbols that are awkward inside
-          # PowerShell strings / GITHUB_ENV files ($, ", `, \, %, #, etc.)
-          $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@*-_='.ToCharArray()
-          $password = -join ((1..20) | ForEach-Object { $chars | Get-Random })
+          $password = "${{ secrets.MY_PASSWORD }}"
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
 
-          New-LocalUser -Name "desktop-user" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -FullName "Desktop User"
+          New-LocalUser -Name "jugaar" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -FullName "Desktop User"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "desktop-user"
           Add-LocalGroupMember -Group "Administrators" -Member "desktop-user"
 
@@ -77,7 +74,7 @@ jobs:
           Write-Host "=========================================="
           Write-Host "Tailscale IP:  $env:TAILSCALE_IP"
           Write-Host "RDP Port:      $env:RDP_PORT"
-          Write-Host "Username:      desktop-user"
+          Write-Host "Username:      jugaar"
           Write-Host "Password:      $env:RDP_PASSWORD"
           Write-Host "=========================================="
           Write-Host "Connect using: $env:TAILSCALE_IP`:$env:RDP_PORT"
