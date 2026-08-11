@@ -1,5 +1,4 @@
 name: Ubuntu-Desk
-
 on:
   workflow_dispatch:
 
@@ -57,6 +56,15 @@ jobs:
           ResultActive=yes
           EOF
 
+      - name: Fix XFCE Session D-Bus Startup
+        # Without this, xrdp sessions inherit a stale DBUS_SESSION_BUS_ADDRESS
+        # / XDG_RUNTIME_DIR, which breaks xfconfd and produces:
+        # "Unable to load a failsafe session ... xfconfd isn't running"
+        # Unsetting them forces a clean D-Bus session to be started for XFCE.
+        run: |
+          sudo sed -i '1a unset DBUS_SESSION_BUS_ADDRESS\nunset XDG_RUNTIME_DIR' /etc/xrdp/startwm.sh
+          head -n 5 /etc/xrdp/startwm.sh
+
       - name: Generate User & Password
         run: |
           # Generate secure random password (shared by RDP and SSH)
@@ -94,7 +102,9 @@ jobs:
       - name: Configure Password SSH Access
         run: |
           # tailscale up --ssh enables Tailscale SSH (identity-based, no
-          # password). This enables normal OpenSSH password login too.
+          # password) and intercepts port 22 ahead of sshd. This step still
+          # configures normal OpenSSH password login in case --ssh is later
+          # removed, or for anyone connecting outside the tailnet SSH layer.
           # Ubuntu's cloud-init image ships a drop-in disabling password
           # auth -- ours must be named to sort before it so it wins
           # (sshd_config uses first-match-wins per directive).
@@ -142,12 +152,13 @@ jobs:
           echo "Password:       ${{ env.RDP_PASSWORD }}"
           echo "------------------------------------------"
           echo "RDP  -> ${{ env.TAILSCALE_IP }}:${{ env.RDP_PORT }}"
-          echo "SSH  -> ssh desktop-user@${{ env.TAILSCALE_IP }}   (password login, port 22)"
+          echo "SSH  -> ssh desktop-user@${{ env.TAILSCALE_IP }}"
+          echo "         (NOTE: --ssh is enabled on this node, so Tailscale SSH"
+          echo "          intercepts port 22 and logs you in via your Tailscale"
+          echo "          identity, no password needed -- this is expected.)"
           echo "=========================================="
           echo "NOTE: When connecting via RDP, ignore certificate warnings."
           echo "If using Microsoft Remote Desktop, ensure 'Color Depth' is set to 16-bit or 24-bit for speed."
-          echo "NOTE: 'tailscale ssh' also works using your Tailscale identity, no password needed,"
-          echo "      e.g. tailscale ssh desktop-user@gh-ubuntu-xfce-${{ github.run_id }}"
 
       - name: Keep Alive Loop
         run: |
