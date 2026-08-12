@@ -1,0 +1,181 @@
+name: Debian-XFCE-DESK
+
+on:
+  workflow_dispatch:
+
+env:
+  RDP_PORT: 3390  # change this to whatever custom port you want
+
+jobs:
+  debian-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # Max duration (6 hours)
+
+    # GitHub-hosted runners only exist as Ubuntu/Windows/macOS -- there is
+    # no native "debian-latest". This runs the whole job inside a Debian
+    # container on top of the ubuntu-latest host instead. --privileged is
+    # needed so Tailscale can create its TUN device.
+    container:
+      image: debian:bookworm
+      options: --privileged
+
+    steps:
+      - name: System Update & Essentials
+        run: |
+          apt-get update
+          apt-get install -y curl wget git sudo gnupg iproute2 procps
+
+      - name: Suppress Interactive Prompts (debconf)
+        run: |
+          echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+
+      - name: Install XFCE, XRDP & OpenSSH
+        timeout-minutes: 15  # fail fast instead of hanging for hours
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo "::group::Installing XFCE + XRDP + OpenSSH"
+          apt-get install -y \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            xfce4 xfce4-goodies xrdp dbus-x11 x11-xserver-utils openssh-server \
+            policykit-1
+          echo "::endgroup::"
+
+          # Fix for XRDP ssl-cert access
+          adduser xrdp ssl-cert
+
+      - name: Fix Polkit for Remote Sessions
+        # Prevents "Authentication Required" popups that crash XRDP
+        run: |
+          mkdir -p /etc/polkit-1/localauthority/50-local.d
+          cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla <<'EOF'
+          [Allow Colord all Users]
+          Identity=unix-user:*
+          Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
+          ResultAny=no
+          ResultInactive=no
+          ResultActive=yes
+          EOF
+
+      - name: Fix XFCE Session Startup (failsafe-session bug)
+        # Root cause of "Unable to load a failsafe session ... $XDG_CONFIG_DIRS
+        # is set incorrectly" is that xfce4-session can't find /etc/xdg/xfce4
+        # because XDG_CONFIG_DIRS is never explicitly exported in the xrdp
+        # session path. Exporting it here is the actual fix. The DBUS/
+        # XDG_RUNTIME_DIR unsets force a clean session bus, which helps too.
+        run: |
+          cat > /etc/xrdp/startwm.sh <<'EOF'
+          #!/bin/sh
+
+          if test -r /etc/profile; then
+            . /etc/profile
+          fi
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_DATA_DIRS=/usr/local/share:/usr/share
+
+          exec startxfce4
+          EOF
+          chmod +x /etc/xrdp/startwm.sh
+          cat /etc/xrdp/startwm.sh
+
+      - name: Create desktop-user (password from secret)
+        env:
+          RDP_PASSWORD: ${{ secrets.MY_PASSWORD }}
+        run: |
+          if [ -z "$RDP_PASSWORD" ]; then
+            echo "::error::secrets.MY_PASSWORD is not set. Add it under repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          adduser --disabled-password --gecos "" desktop-user
+          usermod -aG sudo desktop-user
+          echo "desktop-user:$RDP_PASSWORD" | chpasswd
+          echo "User 'desktop-user' created successfully."
+
+      - name: Configure XFCE Session for desktop-user
+        run: |
+          echo "startxfce4" > /home/desktop-user/.xsession
+          chown desktop-user:desktop-user /home/desktop-user/.xsession
+
+      - name: Configure Custom RDP Port & Security Layer
+        run: |
+          # Only the [Globals] port= line (the first one) is the actual RDP
+          # listener; other port= lines belong to Xorg/Xvnc backend sections.
+          sed -i "0,/^port=3389/s//port=${RDP_PORT}/" /etc/xrdp/xrdp.ini
+
+          # Force plain RDP security -- some clients fail TLS/NLA negotiation
+          # against xrdp's self-signed cert under the default "negotiate" mode.
+          sed -i "s/^security_layer=.*/security_layer=rdp/" /etc/xrdp/xrdp.ini
+
+          grep -E "^(port|security_layer)=" /etc/xrdp/xrdp.ini
+
+      - name: Configure Password SSH Access
+        run: |
+          echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/10-allow-password.conf
+          echo "PermitRootLogin no" >> /etc/ssh/sshd_config.d/10-allow-password.conf
+          mkdir -p /run/sshd
+          service ssh start
+          sshd -T | grep -i passwordauthentication
+
+      - name: Start XRDP Service
+        # No systemd in a container, so services are started directly via
+        # their SysV init scripts (service ...) instead of systemctl.
+        run: |
+          service dbus start || true
+          service xrdp start
+          sleep 3
+
+          if ss -tulnp | grep -q ":${RDP_PORT} "; then
+            echo "XRDP is listening on port ${RDP_PORT}."
+          else
+            echo "XRDP does not appear to be listening. Dumping logs for diagnosis:"
+            cat /var/log/xrdp.log 2>/dev/null || true
+            cat /var/log/xrdp-sesman.log 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Install Tailscale & Connect
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+          # No systemd service manager available, so start tailscaled
+          # manually before bringing the tailnet interface up.
+          mkdir -p /var/lib/tailscale /var/run/tailscale
+          tailscaled --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock &
+          sleep 2
+
+          tailscale up --authkey="$TAILSCALE_AUTH_KEY" \
+            --hostname=gh-debian-xfce-${{ github.run_id }} --ssh
+
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+
+      - name: Connection Details
+        run: |
+          echo "=========================================="
+          echo "      DEBIAN XFCE REMOTE ACCESS READY"
+          echo "=========================================="
+          echo "Tailscale IP:   ${{ env.TAILSCALE_IP }}"
+          echo "Username:       desktop-user"
+          echo "Password:       (value of secrets.MY_PASSWORD)"
+          echo "------------------------------------------"
+          echo "RDP  -> ${{ env.TAILSCALE_IP }}:${{ env.RDP_PORT }}"
+          echo "SSH  -> ssh desktop-user@${{ env.TAILSCALE_IP }}"
+          echo "         (--ssh is enabled, so Tailscale SSH intercepts port"
+          echo "          22 and logs you in via your Tailscale identity)"
+          echo "=========================================="
+          echo "NOTE: When connecting via RDP, ignore certificate warnings."
+          echo "If using Microsoft Remote Desktop, set Color Depth to 16/24-bit for speed."
+
+      - name: Keep Alive Loop
+        run: |
+          while true; do
+            pgrep -x xrdp >/dev/null || service xrdp start
+            sleep 60
+          done
