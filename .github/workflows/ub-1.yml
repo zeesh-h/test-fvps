@@ -1,0 +1,191 @@
+name: Ubuntu-Desk
+
+on:
+  workflow_dispatch:
+
+env:
+  RDP_PORT: 3390  # change this to whatever custom port you want
+
+jobs:
+  ubuntu-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # Max duration (6 hours)
+
+    steps:
+      - name: System Update & Essentials
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget git sudo
+
+      - name: Suppress Interactive Prompts (needrestart/debconf)
+        # Prevents apt from hanging on a whiptail dialog asking which
+        # services to restart, and auto-answers dpkg config-file prompts.
+        run: |
+          sudo mkdir -p /etc/needrestart/conf.d
+          echo "\$nrconf{restart} = 'a';" | sudo tee /etc/needrestart/conf.d/99-autorestart.conf
+          echo "\$nrconf{kernelhints} = 0;" | sudo tee -a /etc/needrestart/conf.d/99-autorestart.conf
+
+      - name: Install XFCE, XRDP & OpenSSH
+        timeout-minutes: 15  # fail fast instead of hanging for hours
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a          # auto-restart services, don't prompt
+          NEEDRESTART_SUSPEND: 1       # belt-and-suspenders: disable needrestart apt hook
+        run: |
+          echo "::group::Installing XFCE + XRDP + OpenSSH (much lighter than full GNOME)"
+          sudo apt-get install -y \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            xfce4 xfce4-goodies xrdp dbus-x11 x11-xserver-utils openssh-server \
+            policykit-1
+          echo "::endgroup::"
+
+          # Fix for XRDP ssl-cert access
+          sudo adduser xrdp ssl-cert
+
+      - name: Fix Polkit for Remote Sessions
+        # Essential: Prevents "Authentication Required" popups that crash XRDP
+        # Ubuntu 24.04's polkit doesn't pre-create this directory, so it must
+        # be created before writing the .pkla file into it.
+        run: |
+          sudo mkdir -p /etc/polkit-1/localauthority/50-local.d
+          sudo bash -c "cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla" <<EOF
+          [Allow Colord all Users]
+          Identity=unix-user:*
+          Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
+          ResultAny=no
+          ResultInactive=no
+          ResultActive=yes
+          EOF
+
+      - name: Fix XFCE Session Startup (failsafe-session bug)
+        # "Unable to load a failsafe session ... $XDG_CONFIG_DIRS is set
+        # incorrectly" happens because xfce4-session can't find
+        # /etc/xdg/xfce4 when XDG_CONFIG_DIRS isn't explicitly exported in
+        # the xrdp session path. Exporting it here is the actual fix; the
+        # DBUS/XDG_RUNTIME_DIR unsets force a clean session bus on top of it.
+        run: |
+          sudo bash -c "cat > /etc/xrdp/startwm.sh" <<'EOF'
+          #!/bin/sh
+
+          if test -r /etc/profile; then
+            . /etc/profile
+          fi
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_DATA_DIRS=/usr/local/share:/usr/share
+
+          exec startxfce4
+          EOF
+          sudo chmod +x /etc/xrdp/startwm.sh
+          cat /etc/xrdp/startwm.sh
+
+      - name: Create desktop-user (password from secret)
+        env:
+          RDP_PASSWORD: ${{ secrets.MY_PASSWORD }}
+        run: |
+          if [ -z "$RDP_PASSWORD" ]; then
+            echo "::error::secrets.MY_PASSWORD is not set. Add it under repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          sudo useradd -m -s /bin/bash -G sudo,adm,dip,video,plugdev desktop-user
+          echo "desktop-user:$RDP_PASSWORD" | sudo chpasswd
+
+          echo "User 'desktop-user' created successfully."
+
+      - name: Configure XFCE Session for desktop-user
+        # Must run AFTER desktop-user exists -- writing to ~/.xsession earlier
+        # would land in the runner's own home dir, not desktop-user's, and
+        # XRDP would then fail to find a session to launch on login.
+        run: |
+          echo "startxfce4" | sudo tee /home/desktop-user/.xsession
+          sudo chown desktop-user:desktop-user /home/desktop-user/.xsession
+
+      - name: Configure Custom RDP Port & Security Layer
+        run: |
+          # Only the [Globals] port= line (the first one) is the actual RDP
+          # listener; the other port= lines belong to Xorg/Xvnc backend
+          # sections and should stay as-is.
+          sudo sed -i "0,/^port=3389/s//port=${RDP_PORT}/" /etc/xrdp/xrdp.ini
+
+          # Force plain RDP security instead of TLS/NLA negotiation -- some
+          # RDP clients fail to connect at all against xrdp's self-signed
+          # cert under the default "negotiate" mode.
+          sudo sed -i "s/^security_layer=.*/security_layer=rdp/" /etc/xrdp/xrdp.ini
+
+          grep -E "^(port|security_layer)=" /etc/xrdp/xrdp.ini
+
+      - name: Configure Password SSH Access
+        run: |
+          # tailscale up --ssh enables Tailscale SSH (identity-based, no
+          # password) and intercepts port 22 ahead of sshd. This step still
+          # configures normal OpenSSH password login in case --ssh is later
+          # removed, or for anyone connecting outside the tailnet SSH layer.
+          # Ubuntu's cloud-init image ships a drop-in disabling password
+          # auth -- ours must be named to sort before it so it wins
+          # (sshd_config uses first-match-wins per directive).
+          echo "PasswordAuthentication yes" | sudo tee /etc/ssh/sshd_config.d/10-allow-password.conf
+          echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config.d/10-allow-password.conf
+          sudo systemctl enable ssh
+          sudo systemctl restart ssh
+          sudo sshd -T | grep -i passwordauthentication
+
+      - name: Start XRDP Service
+        run: |
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sleep 3  # give it a moment to bind the socket
+
+          # Use `ss` instead of `netstat` -- net-tools isn't guaranteed to be
+          # present on the runner image, which can produce a false failure.
+          if sudo ss -tulnp | grep -q ":${RDP_PORT} "; then
+            echo "XRDP is listening on port ${RDP_PORT}."
+          else
+            echo "XRDP does not appear to be listening. Dumping service logs for diagnosis:"
+            sudo systemctl status xrdp --no-pager -l || true
+            sudo systemctl status xrdp-sesman --no-pager -l || true
+            sudo journalctl -u xrdp -u xrdp-sesman --no-pager -n 100 || true
+            exit 1
+          fi
+
+      - name: Install Tailscale & Connect
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=$TAILSCALE_AUTH_KEY --hostname=gh-ubuntu-xfce-${{ github.run_id }} --ssh
+
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+
+      - name: Connection Details
+        run: |
+          echo "=========================================="
+          echo "      UBUNTU XFCE REMOTE ACCESS READY"
+          echo "=========================================="
+          echo "Tailscale IP:   ${{ env.TAILSCALE_IP }}"
+          echo "Username:       desktop-user"
+          echo "Password:       (value of secrets.MY_PASSWORD)"
+          echo "------------------------------------------"
+          echo "RDP  -> ${{ env.TAILSCALE_IP }}:${{ env.RDP_PORT }}"
+          echo "SSH  -> ssh desktop-user@${{ env.TAILSCALE_IP }}"
+          echo "         (NOTE: --ssh is enabled on this node, so Tailscale SSH"
+          echo "          intercepts port 22 and logs you in via your Tailscale"
+          echo "          identity, no password needed -- this is expected.)"
+          echo "=========================================="
+          echo "NOTE: When connecting via RDP, ignore certificate warnings."
+          echo "If using Microsoft Remote Desktop, ensure 'Color Depth' is set to 16-bit or 24-bit for speed."
+
+      - name: Keep Alive Loop
+        run: |
+          while true; do
+            # Check if XRDP is still running
+            if ! systemctl is-active --quiet xrdp; then
+              echo "XRDP died, restarting..."
+              sudo systemctl start xrdp
+            fi
+            sleep 60
+          done
