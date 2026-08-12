@@ -1,4 +1,4 @@
-name: Ubuntu-Desk-1
+name: Ubuntu-DESK-working
 
 on:
   workflow_dispatch:
@@ -59,24 +59,34 @@ jobs:
           EOF
 
       - name: Fix XFCE Session Startup (failsafe-session bug)
-        # "Unable to load a failsafe session ... $XDG_CONFIG_DIRS is set
-        # incorrectly" happens because xfce4-session can't find
-        # /etc/xdg/xfce4 when XDG_CONFIG_DIRS isn't explicitly exported in
-        # the xrdp session path. Exporting it here is the actual fix; the
-        # DBUS/XDG_RUNTIME_DIR unsets force a clean session bus on top of it.
+        # Root cause on GitHub-hosted runners specifically: /etc/environment
+        # bakes in XDG_CONFIG_HOME=/home/runner/.config (and XDG_RUNTIME_DIR)
+        # for the runner account's convenience. PAM applies /etc/environment
+        # to EVERY user's login session on the box, so when xrdp starts a
+        # session as desktop-user, xfce4-session inherits a config path it
+        # has no permission to write to -- it fails silently on that mkdir,
+        # and you get bounced to the generic "failsafe session" popup.
+        # Fix: rebuild all XDG paths explicitly from the real $HOME instead
+        # of trusting whatever PAM/profile injected, and pre-create them.
+        # Do NOT source /etc/profile here -- that's what pulls the bad
+        # values in in the first place.
         run: |
           sudo bash -c "cat > /etc/xrdp/startwm.sh" <<'EOF'
           #!/bin/sh
 
-          if test -r /etc/profile; then
-            . /etc/profile
-          fi
-
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
+
+          export HOME="$(getent passwd "$(whoami)" | cut -d: -f6)"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          export XDG_DATA_HOME="$HOME/.local/share"
           export XDG_CONFIG_DIRS=/etc/xdg
           export XDG_DATA_DIRS=/usr/local/share:/usr/share
 
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+
+          exec > "$HOME/.xsession-errors" 2>&1
           exec startxfce4
           EOF
           sudo chmod +x /etc/xrdp/startwm.sh
@@ -103,6 +113,22 @@ jobs:
         run: |
           echo "startxfce4" | sudo tee /home/desktop-user/.xsession
           sudo chown desktop-user:desktop-user /home/desktop-user/.xsession
+
+      - name: Disable XFCE Compositor (RDP performance)
+        # The compositor buys nothing over RDP -- you only ever see the
+        # final composited frame, so it's pure encode/render overhead on a
+        # GPU-less runner. Pre-seeding this xfconf file means it's off from
+        # the very first session, no live D-Bus session required to set it.
+        run: |
+          sudo -u desktop-user mkdir -p /home/desktop-user/.config/xfce4/xfconf/xfce-perchannel-xml
+          sudo -u desktop-user bash -c "cat > /home/desktop-user/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xfwm4" version="1.0">
+            <property name="general" type="empty">
+              <property name="use_compositing" type="bool" value="false"/>
+            </property>
+          </channel>
+          EOF
 
       - name: Configure Custom RDP Port & Security Layer
         run: |
