@@ -1,0 +1,89 @@
+name: Windows-Desk-5
+
+on:
+  workflow_dispatch:
+
+env:
+  RDP_PORT: 3390  # change this to whatever custom port you want
+
+jobs:
+  windows-connection:
+    runs-on: windows-latest
+    timeout-minutes: 360  # Max duration (6 hours)
+
+    steps:
+      - name: Enable Remote Desktop
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Write-Host "Remote Desktop enabled."
+
+      - name: Configure Custom RDP Port
+        shell: powershell
+        run: |
+          $port = [int]$env:RDP_PORT
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "PortNumber" -Value $port
+
+          New-NetFirewallRule -DisplayName "Custom RDP Port ($port)" -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow
+
+          # Restart the RDP service so the new port takes effect
+          Restart-Service TermService -Force
+          Start-Sleep -Seconds 5
+          Write-Host "RDP configured on port $port"
+
+      - name: Create RDP User & Password
+        shell: powershell
+        run: |
+          $password = "${{ secrets.MY_PASSWORD }}"
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+
+          New-LocalUser -Name "desktop-user" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -FullName "Desktop User"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "desktop-user"
+          Add-LocalGroupMember -Group "Administrators" -Member "desktop-user"
+
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          Write-Host "User 'desktop-user' created successfully."
+
+      - name: Install & Connect Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          Write-Host "Downloading Tailscale..."
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale-setup.exe"
+
+          Write-Host "Installing Tailscale silently..."
+          Start-Process -FilePath "$env:TEMP\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
+
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          Start-Sleep -Seconds 5
+
+          & $tsExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-windows-${{ github.run_id }}"
+
+          Start-Sleep -Seconds 3
+          $ip = (& $tsExe ip -4).Trim()
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "Connected to tailnet with IP: $ip"
+
+      - name: Connection Details
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host "         WINDOWS RDP READY"
+          Write-Host "=========================================="
+          Write-Host "Tailscale IP:  $env:TAILSCALE_IP"
+          Write-Host "RDP Port:      $env:RDP_PORT"
+          Write-Host "Username:      desktop-user"
+          Write-Host "Password:      $env:RDP_PASSWORD"
+          Write-Host "=========================================="
+          Write-Host "Connect using: $env:TAILSCALE_IP`:$env:RDP_PORT"
+          Write-Host "NOTE: In Microsoft Remote Desktop / mstsc, enter the address as IP:PORT"
+          Write-Host "      since the port isn't the RDP default of 3389."
+
+      - name: Keep Alive Loop
+        shell: powershell
+        run: |
+          while ($true) {
+            Start-Sleep -Seconds 60
+          }
